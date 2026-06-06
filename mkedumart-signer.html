@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MKedumart - Bulk Document Signer</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+    <style>
+        :root { --primary-color: #0056b3; --bg-color: #f4f7f6; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, sans-serif; background: var(--bg-color); margin: 0; display: flex; flex-direction: column; align-items: center; }
+        header { background: var(--primary-color); color: white; width: 100%; padding: 20px 0; text-align: center; }
+        h1 { margin: 0; font-size: 26px; }
+        .container { max-width: 900px; width: 100%; background: white; padding: 30px; margin-top: 20px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); box-sizing: border-box; }
+        
+        .section { border: 1px solid #e0e0e0; padding: 20px; border-radius: 6px; margin-bottom: 20px; background: #fafafa; }
+        .section h2 { margin-top: 0; font-size: 18px; color: var(--primary-color); border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; }
+        
+        .controls { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 15px; }
+        .control-group { display: flex; flex-direction: column; gap: 8px; flex: 1; }
+        label { font-weight: bold; color: #333; font-size: 14px; }
+        input[type="file"] { padding: 8px; border: 1px solid #ccc; border-radius: 4px; background: white; }
+        
+        button { background: var(--primary-color); color: white; border: none; padding: 12px 24px; font-size: 16px; border-radius: 4px; cursor: pointer; font-weight: bold; margin-top: 10px; }
+        button:hover { background: #004494; }
+        button:disabled { background: #cccccc; cursor: not-allowed; }
+        
+        /* Viewer constraints */
+        .viewer-wrapper { position: relative; margin-top: 10px; display: inline-block; border: 1px solid #ccc; box-shadow: 0 0 10px rgba(0,0,0,0.1); background: #fff; }
+        canvas { display: block; }
+
+        /* Draggable Signature */
+        #draggable-signature { position: absolute; top: 50px; left: 50px; width: 150px; cursor: grab; display: none; border: 2px dashed #0056b3; background: rgba(255, 255, 255, 0.6); z-index: 10; touch-action: none; }
+        #draggable-signature:active { cursor: grabbing; }
+        #draggable-signature img { width: 100%; height: auto; pointer-events: none; display: block; }
+        
+        /* Results List */
+        #results-list { list-style: none; padding: 0; }
+        #results-list li { background: #e7f3fe; margin-bottom: 10px; padding: 15px; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; border-left: 4px solid var(--primary-color); }
+        .download-link { background: #28a745; color: white; text-decoration: none; padding: 8px 15px; border-radius: 4px; font-weight: bold; }
+        .download-link:hover { background: #218838; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>MKedumart Bulk Signer</h1>
+        <p>Set a template once, sign multiple documents instantly</p>
+    </header>
+
+    <div class="container">
+        <div class="section">
+            <h2>Step 1: Set Up Template & Signature Position</h2>
+            <div class="controls">
+                <div class="control-group">
+                    <label>1. Upload Template PDF (Visual Reference)</label>
+                    <input type="file" id="template-upload" accept="application/pdf">
+                </div>
+                <div class="control-group">
+                    <label>2. Upload Signature (PNG)</label>
+                    <input type="file" id="sig-upload" accept="image/png">
+                </div>
+            </div>
+            
+            <p style="font-size: 14px; color: #555;"><em>Upload both files, then drag the signature to the desired location below.</em></p>
+            
+            <div style="text-align: center; overflow-x: auto;">
+                <div class="viewer-wrapper" id="viewer-wrapper">
+                    <canvas id="pdf-canvas"></canvas>
+                    <div id="draggable-signature">
+                        <img id="sig-img" src="" alt="Signature">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Step 2: Bulk Process Documents</h2>
+            <div class="controls">
+                <div class="control-group">
+                    <label>3. Select Multiple PDFs to Sign</label>
+                    <input type="file" id="bulk-upload" accept="application/pdf" multiple disabled>
+                </div>
+            </div>
+            <button id="process-btn" disabled>Apply Signature to All Files</button>
+        </div>
+
+        <div class="section" id="results-section" style="display: none;">
+            <h2>Step 3: Download Signed Files</h2>
+            <ul id="results-list"></ul>
+        </div>
+    </div>
+
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+        // State Variables
+        let pngBytes = null;
+        let templateCanvas = document.getElementById('pdf-canvas');
+        let ctx = templateCanvas.getContext('2d');
+        
+        // DOM Elements
+        const sigDraggable = document.getElementById('draggable-signature');
+        const sigImg = document.getElementById('sig-img');
+        const bulkUploadInput = document.getElementById('bulk-upload');
+        const processBtn = document.getElementById('process-btn');
+        const resultsSection = document.getElementById('results-section');
+        const resultsList = document.getElementById('results-list');
+
+        // 1. Load Template
+        document.getElementById('template-upload').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const arrayBuffer = await file.arrayBuffer();
+                await renderTemplate(arrayBuffer);
+                checkReady();
+            }
+        });
+
+        // 2. Load Signature
+        document.getElementById('sig-upload').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                pngBytes = await file.arrayBuffer(); 
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    sigImg.src = event.target.result;
+                    checkReady();
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+
+        // Render Template to Canvas
+        async function renderTemplate(data) {
+            const pdfDoc = await pdfjsLib.getDocument({ data: data }).promise;
+            const page = await pdfDoc.getPage(1);
+            const viewport = page.getViewport({ scale: 1.2 });
+            templateCanvas.height = viewport.height;
+            templateCanvas.width = viewport.width;
+            await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+        }
+
+        function checkReady() {
+            if (templateCanvas.width > 0 && sigImg.src) {
+                sigDraggable.style.display = 'block';
+                bulkUploadInput.disabled = false;
+            }
+        }
+
+        // Enable button when bulk files are selected
+        bulkUploadInput.addEventListener('change', () => {
+            if (bulkUploadInput.files.length > 0) processBtn.disabled = false;
+        });
+
+        // Drag & Drop Logic
+        let isDragging = false, startX, startY;
+        const wrapper = document.getElementById('viewer-wrapper');
+
+        sigDraggable.addEventListener('mousedown', dragStart);
+        sigDraggable.addEventListener('touchstart', dragStart, {passive: false});
+
+        function dragStart(e) {
+            e.preventDefault();
+            isDragging = true;
+            const clientX = e.type.includes('mouse') ? e.clientX : e.touches[0].clientX;
+            const clientY = e.type.includes('mouse') ? e.clientY : e.touches[0].clientY;
+            const rect = sigDraggable.getBoundingClientRect();
+            startX = clientX - rect.left;
+            startY = clientY - rect.top;
+        }
+
+        document.addEventListener('mousemove', dragMove);
+        document.addEventListener('touchmove', dragMove, {passive: false});
+
+        function dragMove(e) {
+            if (!isDragging) return;
+            e.preventDefault();
+            const clientX = e.type.includes('mouse') ? e.clientX : e.touches[0].clientX;
+            const clientY = e.type.includes('mouse') ? e.clientY : e.touches[0].clientY;
+            const wrapperRect = wrapper.getBoundingClientRect();
+            
+            let newLeft = clientX - wrapperRect.left - startX;
+            let newTop = clientY - wrapperRect.top - startY;
+
+            newLeft = Math.max(0, Math.min(newLeft, templateCanvas.width - sigDraggable.offsetWidth));
+            newTop = Math.max(0, Math.min(newTop, templateCanvas.height - sigDraggable.offsetHeight));
+
+            sigDraggable.style.left = newLeft + 'px';
+            sigDraggable.style.top = newTop + 'px';
+        }
+
+        document.addEventListener('mouseup', () => isDragging = false);
+        document.addEventListener('touchend', () => isDragging = false);
+
+        // 3. Process Bulk Files
+        processBtn.addEventListener('click', async () => {
+            processBtn.disabled = true;
+            processBtn.innerText = "Processing...";
+            resultsList.innerHTML = ""; // Clear previous results
+            resultsSection.style.display = "block";
+
+            // Calculate ratios based on the template canvas
+            const domX = parseFloat(sigDraggable.style.left || 50);
+            const domY = parseFloat(sigDraggable.style.top || 50);
+            const domWidth = sigDraggable.offsetWidth;
+            
+            // We use percentages so it scales perfectly even if target PDFs are slightly different sizes
+            const percentX = domX / templateCanvas.width;
+            const percentY = domY / templateCanvas.height;
+            const percentWidth = domWidth / templateCanvas.width;
+
+            const files = bulkUploadInput.files;
+
+            for (let i = 0; i < files.length; i++) {
+                try {
+                    const file = files[i];
+                    const pdfBytes = await file.arrayBuffer();
+                    
+                    const pdfDocLib = await PDFLib.PDFDocument.load(pdfBytes);
+                    const pngImage = await pdfDocLib.embedPng(pngBytes);
+                    
+                    const pages = pdfDocLib.getPages();
+                    const firstPage = pages[0]; // Apply to first page
+
+                    const pdfWidth = firstPage.getWidth();
+                    const pdfHeight = firstPage.getHeight();
+
+                    // Map percentages to actual PDF coordinates
+                    const finalSigWidth = pdfWidth * percentWidth;
+                    const finalSigHeight = (finalSigWidth / pngImage.width) * pngImage.height;
+
+                    const pdfX = pdfWidth * percentX;
+                    const pdfY = pdfHeight - (pdfHeight * percentY) - finalSigHeight; // Flip Y-axis for PDF
+
+                    firstPage.drawImage(pngImage, {
+                        x: pdfX,
+                        y: pdfY,
+                        width: finalSigWidth,
+                        height: finalSigHeight,
+                    });
+
+                    // Generate file
+                    const pdfBytesFinal = await pdfDocLib.save();
+                    const blob = new Blob([pdfBytesFinal], { type: 'application/pdf' });
+                    const url = URL.createObjectURL(blob);
+
+                    // Create Download List Item
+                    const li = document.createElement('li');
+                    li.innerHTML = `
+                        <span><strong>${file.name}</strong> (Signed)</span>
+                        <a href="${url}" download="Signed_${file.name}" class="download-link">Download</a>
+                    `;
+                    resultsList.appendChild(li);
+
+                } catch (error) {
+                    console.error(`Error processing ${files[i].name}:`, error);
+                    const li = document.createElement('li');
+                    li.style.borderLeftColor = "red";
+                    li.innerHTML = `<span style="color:red;">Error processing: ${files[i].name}</span>`;
+                    resultsList.appendChild(li);
+                }
+            }
+
+            processBtn.innerText = "Processing Complete!";
+            setTimeout(() => {
+                processBtn.innerText = "Apply Signature to All Files";
+                processBtn.disabled = false;
+            }, 3000);
+        });
+    </script>
+</body>
+</html>
